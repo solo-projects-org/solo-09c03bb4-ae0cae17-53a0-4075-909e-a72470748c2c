@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+{% block head %}{% if pending %}<meta http-equiv="refresh" content="3">{% endif %}{% endblock %}
+{% block content %}
+
+{% if notice %}<div class="flash notice">{{ notice }}</div>{% endif %}
+{% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+
+<div class="panel">
+  <h2>当前数据来源与匹配参数</h2>
+  <div class="meta">
+    <div class="item"><strong>路网修订</strong>
+      {% if network_revision %}
+        r{{ network_revision['revision_no'] }} ·
+        {{ network_revision['segment_count'] }} 段 ·
+        {{ network_revision['filename'] }}
+      {% else %}<span class="empty">未上传</span>{% endif %}
+    </div>
+    <div class="item"><strong>定位点修订</strong>
+      {% if points_revision %}
+        r{{ points_revision['revision_no'] }} ·
+        {{ points_revision['point_count'] }} 点 ·
+        {{ points_revision['filename'] }}
+      {% else %}<span class="empty">未上传</span>{% endif %}
+    </div>
+    <div class="item"><strong>匹配半径</strong>{{ "%g"|format(radius) }} 米</div>
+  </div>
+  <form class="inline" method="post" action="/radius" style="margin-top:14px">
+    <div>
+      <label for="radius">修改匹配半径（米）</label>
+      <input id="radius" name="radius" type="number" step="0.1" min="0.1" value="{{ '%g'|format(radius) }}" required>
+    </div>
+    <button type="submit">保存并重算</button>
+  </form>
+  <p class="hint">保存半径会立即作废已发布结果并安排重算，避免用旧参数的结果继续分析。</p>
+</div>
+
+<div class="panel">
+  <h2>上传修订（整版替换）</h2>
+  <div class="grid2">
+    <form method="post" action="/network" enctype="multipart/form-data">
+      <h3 style="font-size:15px;margin:0 0 8px">有向路段 CSV</h3>
+      <label for="network_file">列：路段号、起点x、起点y、终点x、终点y</label>
+      <input id="network_file" name="file" type="file" accept=".csv,text/csv" required>
+      <label for="network_note" style="margin-top:8px">备注（可选）</label>
+      <input id="network_note" name="note" type="text" placeholder="例如 2026-11 路网更正">
+      <button type="submit" style="margin-top:10px">上传路网修订</button>
+      <p class="hint">坐标单位为米（平面坐标）。起终点相接即视为可沿行驶方向进入下一段。</p>
+    </form>
+    <form method="post" action="/points" enctype="multipart/form-data">
+      <h3 style="font-size:15px;margin:0 0 8px">定位点 CSV</h3>
+      <label for="points_file">列：时刻、x、y（按 UTC 升序）</label>
+      <input id="points_file" name="file" type="file" accept=".csv,text/csv" required>
+      <label for="points_note" style="margin-top:8px">备注（可选）</label>
+      <input id="points_note" name="note" type="text" placeholder="例如 车辆 A 2026-11-18 班次">
+      <button type="submit" style="margin-top:10px">上传定位点修订</button>
+      <p class="hint">带 +08:00 等时区偏移的时刻会自动换算为 UTC；无时区按 UTC 处理。</p>
+    </form>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>轨迹结果</h2>
+  {% if result_ctx %}
+    {% set r = result_ctx.result %}
+    {% set d = result_ctx.diagnostics %}
+    <div class="meta" style="margin-bottom:12px">
+      <div class="item"><strong>状态</strong>
+        <span class="badge {{ r['status'] }}">{{ result_ctx.status_text }}</span>
+      </div>
+      <div class="item"><strong>发布结果编号</strong>#{{ r['id'] }}</div>
+      <div class="item"><strong>依据来源</strong>
+        路网 r{{ r['network_revision_id'] }} / 定位点 r{{ r['points_revision_id'] }} / 半径 {{ "%g"|format(r['radius']) }} m
+      </div>
+      <div class="item"><strong>发布时间（UTC）</strong>{{ r['published_at'] }}</div>
+      {% if r['total_distance'] is not none %}
+      <div class="item"><strong>点到路段距离总和</strong>{{ "%.3f"|format(r['total_distance']) }} m</div>
+      {% endif %}
+    </div>
+    {% if r['status'] == 'review' %}
+      <div class="reason">
+        <strong>待核，不给出唯一轨迹。</strong>{{ result_ctx.reason_text }}
+        {% if d.get('point_index') is not none %}<br>首个问题定位点序号：{{ d['point_index'] + 1 }}{% endif %}
+        {% if d.get('path_count') %}<br>并列最优轨迹数（至少）：{{ d['path_count'] }}{% endif %}
+      </div>
+    {% else %}
+      <div class="track">路段序列：{{ result_ctx.sequence|join(' → ') }}</div>
+    {% endif %}
+    <p style="margin-top:12px">
+      <a href="/results/{{ r['id'] }}">查看逐点归属明细 →</a>
+    </p>
+  {% else %}
+    <p class="empty">
+      {% if not network_revision or not points_revision %}
+        上传路网和定位点各一个修订后，系统会自动计算。
+      {% elif pending %}
+        当前来源{% if job and job['state'] == 'running' %}正在计算{% else %}等待重算{% endif %}，完成后在此显示结果。
+      {% else %}
+        当前来源尚无已发布结果，请点击重算。
+      {% endif %}
+    </p>
+  {% endif %}
+  <form method="post" action="/recompute" style="margin-top:12px">
+    <button type="submit" class="secondary">重新计算当前来源</button>
+  </form>
+  {% if job and job['state'] != 'done' %}
+    <p class="hint">
+      最近任务 #{{ job['id'] }}：<span class="badge {{ job['state'] }}">{{ job_text.get(job['state'], job['state']) }}</span>
+      {% if job['error'] %} · {{ job['error'] }}{% endif %}
+      {% if job['state'] == 'pending' and job['attempts'] %} · 已尝试 {{ job['attempts'] }} 次，稍后自动重试{% endif %}
+    </p>
+  {% endif %}
+</div>
+
+<div class="panel">
+  <h2>修订与任务记录</h2>
+  <div class="grid2">
+    <div>
+      <h3 style="font-size:15px">路网修订（新→旧）</h3>
+      {% if network_revisions %}
+        <ul class="plain">
+        {% for rev in network_revisions %}
+          <li>r{{ rev['revision_no'] }} · {{ rev['segment_count'] }} 段 · {{ rev['filename'] }}
+            {% set note = rev['note'] %}{% if note %} · {{ note }}{% endif %}
+            <span class="hint">{{ rev['created_at'] }}</span></li>
+        {% endfor %}
+        </ul>
+      {% else %}<p class="empty">暂无</p>{% endif %}
+    </div>
+    <div>
+      <h3 style="font-size:15px">定位点修订（新→旧）</h3>
+      {% if points_revisions %}
+        <ul class="plain">
+        {% for rev in points_revisions %}
+          <li>r{{ rev['revision_no'] }} · {{ rev['point_count'] }} 点 · {{ rev['filename'] }}
+            {% set note = rev['note'] %}{% if note %} · {{ note }}{% endif %}
+            <span class="hint">{{ rev['created_at'] }}</span></li>
+        {% endfor %}
+        </ul>
+      {% else %}<p class="empty">暂无</p>{% endif %}
+    </div>
+  </div>
+
+  {% if jobs %}
+    <h3 style="font-size:15px;margin-top:18px">最近任务</h3>
+    <div class="scroll" style="max-height:240px">
+    <table>
+      <thead><tr><th>任务</th><th>路网</th><th>定位点</th><th>半径</th><th>状态</th><th>说明</th><th>创建时间</th></tr></thead>
+      <tbody>
+      {% for j in jobs %}
+        <tr>
+          <td>#{{ j['id'] }}</td>
+          <td>r{{ j['network_rev_no'] }}</td>
+          <td>r{{ j['points_rev_no'] }}</td>
+          <td class="num">{{ "%g"|format(j['radius']) }} m</td>
+          <td><span class="badge {{ j['state'] }}">{{ job_text.get(j['state'], j['state']) }}</span></td>
+          <td>{{ j['error'] or '' }}</td>
+          <td class="mono">{{ j['created_at'] }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  {% endif %}
+</div>
+
+{% if stale_results %}
+<div class="panel">
+  <h2>已失效结果（不得用于分析）</h2>
+  <div class="scroll" style="max-height:300px">
+  <table>
+    <thead><tr><th>结果</th><th>路网</th><th>定位点</th><th>状态</th><th>失效原因</th><th>失效时间（UTC）</th></tr></thead>
+    <tbody>
+    {% for r in stale_results %}
+      <tr>
+        <td><a href="/results/{{ r['id'] }}">#{{ r['id'] }}</a></td>
+        <td>r{{ r['network_rev_no'] }}</td>
+        <td>r{{ r['points_rev_no'] }}</td>
+        <td><span class="badge stale">{{ '唯一轨迹' if r['status'] == 'valid' else '待核' }}</span></td>
+        <td>{{ source_reason_text.get(r['invalidated_reason'], r['invalidated_reason']) }}</td>
+        <td class="mono">{{ r['invalidated_at'] }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}

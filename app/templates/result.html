@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}结果 #{{ result['id'] }} · 公交行驶轨迹整理{% endblock %}
+{% block content %}
+
+{% if result['invalidated_at'] %}
+<div class="flash error">
+  该结果已于 {{ result['invalidated_at'] }} 失效（{{ invalidation_text }}），<strong>不得用于路段运行时间分析</strong>。
+  <a href="/">返回查看当前结果</a>
+</div>
+{% endif %}
+
+<div class="panel">
+  <h2>结果 #{{ result['id'] }}</h2>
+  <div class="meta">
+    <div class="item"><strong>状态</strong>
+      <span class="badge {{ result['status'] }}">{{ status_text }}</span>
+    </div>
+    <div class="item"><strong>路网修订</strong>
+      r{{ network_revision['revision_no'] }} · {{ network_revision['segment_count'] }} 段
+    </div>
+    <div class="item"><strong>定位点修订</strong>
+      r{{ points_revision['revision_no'] }} · {{ points_revision['point_count'] }} 点
+    </div>
+    <div class="item"><strong>匹配半径</strong>{{ "%g"|format(result['radius']) }} 米</div>
+    <div class="item"><strong>发布时间（UTC）</strong>{{ result['published_at'] }}</div>
+    {% if result['total_distance'] is not none %}
+    <div class="item"><strong>距离总和</strong>{{ "%.3f"|format(result['total_distance']) }} 米</div>
+    {% endif %}
+  </div>
+
+  {% if result['status'] == 'review' %}
+    <div class="reason" style="margin-top:14px">
+      <strong>待核：未发布唯一轨迹。</strong>{{ reason_text }}
+      {% if diagnostics.get('point_index') is not none %}
+        <br>首个问题定位点序号：{{ diagnostics['point_index'] + 1 }}
+      {% endif %}
+      {% if diagnostics.get('path_count') %}
+        <br>并列最优轨迹数（至少）：{{ diagnostics['path_count'] }}
+      {% endif %}
+    </div>
+  {% else %}
+    <div class="track" style="margin-top:14px">
+      路段序列：{{ sequence|join(' → ') }}
+    </div>
+  {% endif %}
+  <p><a href="/">← 返回操作页</a></p>
+</div>
+
+<div class="panel">
+  <h2>逐点归属{% if result['status'] == 'valid' %}与候选{% endif %}</h2>
+  <p class="hint">
+    每个定位点只考虑半径内的路段；相邻点只能停在同段，或沿行驶方向进入“上一段终点 = 下一段起点”的相接路段。
+    绿色行表示最终选中的归属。
+  </p>
+  <div class="scroll">
+  <table>
+    <thead>
+      <tr>
+        <th>序号</th><th>时刻（UTC）</th><th>x</th><th>y</th>
+        <th>半径内候选路段（距离）</th>
+        {% if result['status'] == 'valid' %}<th>选中路段</th><th>点距</th>{% endif %}
+      </tr>
+    </thead>
+    <tbody>
+    {% for row in rows %}
+      <tr class="{% if row['no_candidate'] %}no-candidate{% elif row['assignment'] %}current-seg{% endif %}">
+        <td class="num">{{ row['point']['seq'] }}</td>
+        <td class="mono">{{ row['point']['ts'] }}</td>
+        <td class="num mono">{{ "%.3f"|format(row['point']['x']) }}</td>
+        <td class="num mono">{{ "%.3f"|format(row['point']['y']) }}</td>
+        <td>{{ row['candidate_text'] }}</td>
+        {% if result['status'] == 'valid' %}
+          <td class="mono">{{ row['assignment']['segment_id'] if row['assignment'] else '—' }}</td>
+          <td class="num">{{ "%.3f"|format(row['assignment']['distance']) if row['assignment'] else '—' }}</td>
+        {% endif %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+
+{% if result['status'] == 'valid' and assignments %}
+<div class="panel">
+  <h2>选中路段明细（按首次进入时点）</h2>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>首次归属的定位点序号</th><th>路段号</th><th>起点（x, y）</th><th>终点（x, y）</th><th>该点距（米）</th></tr></thead>
+    <tbody>
+    {% for s in segment_runs %}
+      <tr class="current-seg">
+        <td class="num">{{ s['point_seq'] }}</td>
+        <td class="mono">{{ s['segment_id'] }}</td>
+        <td class="mono">{{ "%.3f"|format(s['segment_from'][0]) }}, {{ "%.3f"|format(s['segment_from'][1]) }}</td>
+        <td class="mono">{{ "%.3f"|format(s['segment_to'][0]) }}, {{ "%.3f"|format(s['segment_to'][1]) }}</td>
+        <td class="num">{{ "%.3f"|format(s['distance']) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}

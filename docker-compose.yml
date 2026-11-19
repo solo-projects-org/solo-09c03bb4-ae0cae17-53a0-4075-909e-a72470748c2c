@@ -1,0 +1,16 @@
+services:
+  track-matcher:
+    build:
+      context: .
+    image: track-matcher:local
+    ports:
+      - "8000:8000"
+    environment:
+      TRACK_MATCHER_DB: /app/data/track_matcher.sqlite3
+      TRACK_MATCHER_LOG_LEVEL: INFO
+    volumes:
+      - track_matcher_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  track_matcher_data:

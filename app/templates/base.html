@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}公交行驶轨迹整理{% endblock %}</title>
+<link rel="stylesheet" href="/static/style.css">
+{% block head %}{% endblock %}
+</head>
+<body>
+<header class="top">
+  <h1>公交行驶轨迹整理</h1>
+  <p>有向路段 + 同车定位点 → 路段运行时间分析用轨迹（匹配半径内、按行驶方向连通、全程距离和最小且唯一）</p>
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>
