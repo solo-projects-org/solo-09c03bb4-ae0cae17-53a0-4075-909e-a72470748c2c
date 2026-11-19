@@ -97,6 +97,9 @@ form.inline > div { flex: 1 1 160px; }
 .badge.pending, .badge.running { background: var(--info-soft); color: #234f86; }
 .badge.failed { background: var(--bad-soft); color: var(--bad); }
 .badge.done { background: var(--accent-soft); color: var(--accent); }
+.badge.confirmed { background: var(--accent-soft); color: var(--accent); }
+.badge.insufficient { background: var(--warn-soft); color: var(--warn); }
+.badge.unavailable { background: var(--bad-soft); color: var(--bad); }
 
 .track {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;

@@ -17,6 +17,7 @@ from fastapi.templating import Jinja2Templates
 from urllib.parse import quote
 
 from . import db, service
+from .dwell import REASON_TEXT as DWELL_REASON_TEXT
 from .parsing import UploadError, decode_csv, parse_network, parse_points
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -54,6 +55,19 @@ SOURCE_REASON_TEXT = {
     "SUPERSEDED": "被更新的结果取代",
 }
 
+DWELL_STATUS_TEXT = {
+    "confirmed": "已驻留",
+    "insufficient": "证据不足",
+    "unavailable": "无法核对",
+}
+
+DWELL_JOB_TEXT = {
+    "pending": "待核对",
+    "running": "核对中",
+    "done": "已完成",
+    "stale": "已作废（来源或参数已更换）",
+}
+
 
 class Worker(threading.Thread):
     """Single background thread that claims and executes jobs."""
@@ -72,32 +86,55 @@ class Worker(threading.Thread):
         try:
             while not self.stop_event.is_set():
                 job = None
+                kind = None
                 try:
                     job = service.claim_job(conn)
+                    kind = "match"
+                    if job is None:
+                        job = service.claim_dwell_job(conn)
+                        kind = "dwell"
                     if job is None:
                         self.wake_event.wait(0.5)
                         self.wake_event.clear()
                         continue
-                    log.info(
-                        "computing job %s (network r%s, points r%s, radius %s)",
-                        job["id"],
-                        job["network_revision_id"],
-                        job["points_revision_id"],
-                        job["radius"],
-                    )
-                    service.execute_job(conn, job)
-                    log.info("job %s finished", job["id"])
+                    if kind == "match":
+                        log.info(
+                            "computing job %s (network r%s, points r%s, radius %s)",
+                            job["id"],
+                            job["network_revision_id"],
+                            job["points_revision_id"],
+                            job["radius"],
+                        )
+                        service.execute_job(conn, job)
+                    else:
+                        log.info(
+                            "checking dwell job %s (check %s, result %s)",
+                            job["id"],
+                            job["check_id"],
+                            job["result_id"],
+                        )
+                        service.execute_dwell_job(conn, job)
+                    log.info("%s job %s finished", kind, job["id"])
                 except Exception:  # noqa: BLE001 - worker must survive
                     log.exception("job failed")
                     if job is not None:
                         try:
-                            service.fail_job(
-                                conn,
-                                job["id"],
-                                job["claim_token"] or "",
-                                "计算失败，稍后自动重试",
-                                job["attempts"] or 0,
-                            )
+                            if kind == "dwell":
+                                service.fail_dwell_job(
+                                    conn,
+                                    job["id"],
+                                    job["claim_token"] or "",
+                                    "核对失败，稍后自动重试",
+                                    job["attempts"] or 0,
+                                )
+                            else:
+                                service.fail_job(
+                                    conn,
+                                    job["id"],
+                                    job["claim_token"] or "",
+                                    "计算失败，稍后自动重试",
+                                    job["attempts"] or 0,
+                                )
                         except Exception:  # noqa: BLE001
                             log.exception("could not record job failure")
                     self.stop_event.wait(1.0)
@@ -133,6 +170,9 @@ async def lifespan(app: FastAPI):
         reset = service.reset_running_jobs(conn)
         if reset:
             log.info("reset %s interrupted job(s) to pending", reset)
+        reset_dwell = service.reset_running_dwell_jobs(conn)
+        if reset_dwell:
+            log.info("reset %s interrupted dwell job(s) to pending", reset_dwell)
     finally:
         conn.close()
     if WORKER_ENABLED:
@@ -251,6 +291,9 @@ def dashboard(request: Request, notice: str | None = None, error: str | None = N
         ).fetchall()
         network_revisions = db.list_revisions(conn, "network", 10)
         points_revisions = db.list_revisions(conn, "points", 10)
+        dwell_checks = service.list_dwell_checks(conn)
+        dwell_jobs = service.list_dwell_jobs(conn, 10)
+        stale_dwell = service.list_stale_dwell_conclusions(conn, 10)
         stale_results = conn.execute(
             """
             SELECT r.*, nr.revision_no AS network_rev_no,
@@ -272,6 +315,9 @@ def dashboard(request: Request, notice: str | None = None, error: str | None = N
         and job["points_revision_id"] == points_revision["id"]
         and abs(job["radius"] - radius) <= 1e-12
     )
+    dwell_pending = any(
+        j["state"] in ("pending", "running") for j in dwell_jobs
+    )
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -287,9 +333,14 @@ def dashboard(request: Request, notice: str | None = None, error: str | None = N
             "points_revisions": points_revisions,
             "stale_results": stale_results,
             "source_reason_text": SOURCE_REASON_TEXT,
+            "dwell_checks": dwell_checks,
+            "dwell_jobs": dwell_jobs,
+            "dwell_job_text": DWELL_JOB_TEXT,
+            "dwell_status_text": DWELL_STATUS_TEXT,
+            "stale_dwell": stale_dwell,
             "notice": notice,
             "error": error,
-            "pending": pending,
+            "pending": pending or dwell_pending,
             "worker_enabled": WORKER_ENABLED,
         },
     )
@@ -422,6 +473,132 @@ def result_detail(request: Request, result_id: int):
             "points_revision": points_revision,
             "source_reason_text": SOURCE_REASON_TEXT,
         },
+    )
+
+
+def _parse_float_field(raw: str, label: str) -> tuple[float | None, str | None]:
+    try:
+        value = float(raw)
+    except ValueError:
+        return None, f"{label}必须是数字"
+    if not isfinite(value):
+        return None, f"{label}必须是有限数字"
+    return value, None
+
+
+@app.post("/dwell-checks")
+def create_dwell_check(
+    segment_id: str = Form(...),
+    x: str = Form(...),
+    y: str = Form(...),
+    dwell_radius: str = Form(...),
+    min_dwell: str = Form(...),
+    max_gap: str = Form(...),
+    note: str = Form(""),
+):
+    segment_id = segment_id.strip()
+    if not segment_id:
+        return _redirect("/", error="站点所属路段号不能为空")
+    if len(segment_id) > 200:
+        return _redirect("/", error="路段号过长")
+    x_value, err = _parse_float_field(x, "站点平面坐标 x")
+    if err:
+        return _redirect("/", error=err)
+    y_value, err = _parse_float_field(y, "站点平面坐标 y")
+    if err:
+        return _redirect("/", error=err)
+    radius_value, err = _parse_float_field(dwell_radius, "判定半径")
+    if err:
+        return _redirect("/", error=err)
+    if radius_value <= 0 or radius_value > 100000:
+        return _redirect("/", error="判定半径必须大于 0 且不超过 100000 米")
+    min_dwell_value, err = _parse_float_field(min_dwell, "最短驻留时长")
+    if err:
+        return _redirect("/", error=err)
+    if min_dwell_value < 0 or min_dwell_value > 86400:
+        return _redirect("/", error="最短驻留时长必须在 0 到 86400 秒之间")
+    max_gap_value, err = _parse_float_field(max_gap, "最大采样间隔")
+    if err:
+        return _redirect("/", error=err)
+    if max_gap_value <= 0 or max_gap_value > 86400:
+        return _redirect("/", error="最大采样间隔必须大于 0 且不超过 86400 秒")
+    conn = _conn()
+    try:
+        check_id = service.create_dwell_check(
+            conn, segment_id, x_value, y_value, radius_value,
+            min_dwell_value, max_gap_value, note.strip()[:200],
+        )
+    finally:
+        conn.close()
+    notify_worker()
+    return _redirect(
+        f"/dwell-checks/{check_id}",
+        notice=f"驻留核对 #{check_id} 已登记并安排核对",
+    )
+
+
+@app.get("/dwell-checks/{check_id}", response_class=HTMLResponse)
+def dwell_detail(request: Request, check_id: int,
+                 notice: str | None = None, error: str | None = None):
+    conn = _conn()
+    try:
+        check = service.get_dwell_check(conn, check_id)
+        if check is None:
+            return _redirect("/", error="驻留核对不存在")
+        conclusion = service.current_dwell_conclusion(conn, check_id)
+        job = service.latest_dwell_job_for_check(conn, check_id)
+        history = conn.execute(
+            """
+            SELECT * FROM dwell_conclusions WHERE check_id = ?
+            ORDER BY id DESC LIMIT 20
+            """,
+            (check_id,),
+        ).fetchall()
+        current = service.current_result(conn)
+    finally:
+        conn.close()
+    evidence = json.loads(conclusion["evidence_json"]) if conclusion else []
+    diagnostics = (
+        json.loads(conclusion["diagnostics_json"]) if conclusion else {}
+    )
+    return templates.TemplateResponse(
+        request,
+        "dwell.html",
+        {
+            "check": check,
+            "conclusion": conclusion,
+            "evidence": evidence,
+            "diagnostics": diagnostics,
+            "job": job,
+            "history": history,
+            "current_result": current,
+            "dwell_status_text": DWELL_STATUS_TEXT,
+            "dwell_job_text": DWELL_JOB_TEXT,
+            "dwell_reason_text": DWELL_REASON_TEXT,
+            "source_reason_text": SOURCE_REASON_TEXT,
+            "notice": notice,
+            "error": error,
+        },
+    )
+
+
+@app.post("/dwell-checks/{check_id}/recheck")
+def recheck_dwell(check_id: int):
+    conn = _conn()
+    try:
+        if service.get_dwell_check(conn, check_id) is None:
+            return _redirect("/", error="驻留核对不存在")
+        job_id = service.enqueue_dwell_check(conn, check_id)
+    finally:
+        conn.close()
+    notify_worker()
+    if job_id is None:
+        return _redirect(
+            f"/dwell-checks/{check_id}",
+            error="当前没有已发布的轨迹结果，无法安排核对",
+        )
+    return _redirect(
+        f"/dwell-checks/{check_id}", notice="已按当前轨迹重新安排核对"
     )
 
 

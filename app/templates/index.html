@@ -112,6 +112,80 @@
 </div>
 
 <div class="panel">
+  <h2>站点驻留核对</h2>
+  <p class="hint">
+    录入站点所属路段号、平面坐标、判定半径、最短驻留时长与最大采样间隔；系统只取现行唯一轨迹中
+    归属该路段且落入站点半径的连续定位点核对是否持续驻留。结论绑定所用轨迹、路网/定位点修订与匹配半径；
+    任一换版即撤销旧结论并按新轨迹自动重核。
+  </p>
+  <form class="inline" method="post" action="/dwell-checks">
+    <div>
+      <label for="dc_segment">站点所属路段号</label>
+      <input id="dc_segment" name="segment_id" type="text" placeholder="例如 N101" required>
+    </div>
+    <div>
+      <label for="dc_x">站点平面坐标 x（米）</label>
+      <input id="dc_x" name="x" type="number" step="0.001" required>
+    </div>
+    <div>
+      <label for="dc_y">站点平面坐标 y（米）</label>
+      <input id="dc_y" name="y" type="number" step="0.001" required>
+    </div>
+    <div>
+      <label for="dc_radius">判定半径（米）</label>
+      <input id="dc_radius" name="dwell_radius" type="number" step="0.1" min="0.1" value="15" required>
+    </div>
+    <div>
+      <label for="dc_min">最短驻留时长（秒）</label>
+      <input id="dc_min" name="min_dwell" type="number" step="1" min="0" value="60" required>
+    </div>
+    <div>
+      <label for="dc_gap">最大采样间隔（秒）</label>
+      <input id="dc_gap" name="max_gap" type="number" step="1" min="1" value="30" required>
+    </div>
+    <div>
+      <label for="dc_note">备注（可选）</label>
+      <input id="dc_note" name="note" type="text" placeholder="例如 人民广场站（上行）">
+    </div>
+    <div style="flex:0 0 auto">
+      <button type="submit">登记并核对</button>
+    </div>
+  </form>
+
+  {% if dwell_checks %}
+    <div class="scroll" style="max-height:280px;margin-top:14px">
+    <table>
+      <thead><tr><th>核对</th><th>路段号</th><th>站心坐标</th><th>判定半径</th><th>驻留/间隔</th><th>现行结论</th><th>绑定轨迹</th><th>核对时间</th></tr></thead>
+      <tbody>
+      {% for c in dwell_checks %}
+        <tr>
+          <td><a href="/dwell-checks/{{ c['id'] }}">#{{ c['id'] }}</a></td>
+          <td class="mono">{{ c['segment_id'] }}</td>
+          <td class="mono">{{ "%.1f"|format(c['x']) }}, {{ "%.1f"|format(c['y']) }}</td>
+          <td class="num">{{ "%g"|format(c['radius']) }} m</td>
+          <td class="num">{{ "%g"|format(c['min_dwell_seconds']) }} s / {{ "%g"|format(c['max_gap_seconds']) }} s</td>
+          <td>
+            {% if c['conclusion_status'] %}
+              <span class="badge {{ c['conclusion_status'] }}">{{ dwell_status_text[c['conclusion_status']] }}</span>
+            {% else %}
+              <span class="badge pending">待核</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if c['conclusion_result_id'] %}<a href="/results/{{ c['conclusion_result_id'] }}">#{{ c['conclusion_result_id'] }}</a>{% else %}—{% endif %}
+          </td>
+          <td class="mono">{{ c['conclusion_published_at'] or '—' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  {% else %}
+    <p class="empty" style="margin-top:10px">尚未登记驻留核对。</p>
+  {% endif %}
+</div>
+
+<div class="panel">
   <h2>修订与任务记录</h2>
   <div class="grid2">
     <div>
@@ -161,7 +235,49 @@
     </table>
     </div>
   {% endif %}
+  {% if dwell_jobs %}
+    <h3 style="font-size:15px;margin-top:18px">最近驻留核对任务</h3>
+    <div class="scroll" style="max-height:200px">
+    <table>
+      <thead><tr><th>任务</th><th>核对</th><th>轨迹</th><th>状态</th><th>说明</th><th>创建时间</th></tr></thead>
+      <tbody>
+      {% for j in dwell_jobs %}
+        <tr>
+          <td>#{{ j['id'] }}</td>
+          <td><a href="/dwell-checks/{{ j['check_id'] }}">#{{ j['check_id'] }}</a>（{{ j['check_segment_id'] }}）</td>
+          <td><a href="/results/{{ j['result_id'] }}">#{{ j['result_id'] }}</a></td>
+          <td><span class="badge {{ j['state'] }}">{{ dwell_job_text.get(j['state'], j['state']) }}</span></td>
+          <td>{{ j['error'] or '' }}</td>
+          <td class="mono">{{ j['created_at'] }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  {% endif %}
 </div>
+
+{% if stale_dwell %}
+<div class="panel">
+  <h2>已撤销的驻留结论（不得作为驻留依据）</h2>
+  <div class="scroll" style="max-height:240px">
+  <table>
+    <thead><tr><th>结论</th><th>核对</th><th>原结论</th><th>撤销原因</th><th>撤销时间（UTC）</th></tr></thead>
+    <tbody>
+    {% for d in stale_dwell %}
+      <tr>
+        <td>#{{ d['id'] }}</td>
+        <td><a href="/dwell-checks/{{ d['check_id'] }}">#{{ d['check_id'] }}</a>（{{ d['check_segment_id'] }}）</td>
+        <td><span class="badge stale">{{ dwell_status_text[d['status']] }}</span></td>
+        <td>{{ source_reason_text.get(d['invalidated_reason'], d['invalidated_reason']) }}</td>
+        <td class="mono">{{ d['invalidated_at'] }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
 
 {% if stale_results %}
 <div class="panel">

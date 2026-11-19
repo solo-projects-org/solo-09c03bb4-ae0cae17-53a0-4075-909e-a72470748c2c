@@ -93,6 +93,63 @@ CREATE TABLE IF NOT EXISTS results (
 CREATE INDEX IF NOT EXISTS idx_results_current
     ON results(network_revision_id, points_revision_id, radius, id);
 
+CREATE TABLE IF NOT EXISTS dwell_checks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    segment_id TEXT NOT NULL,
+    x REAL NOT NULL,
+    y REAL NOT NULL,
+    radius REAL NOT NULL,
+    min_dwell_seconds REAL NOT NULL,
+    max_gap_seconds REAL NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dwell_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    check_id INTEGER NOT NULL REFERENCES dwell_checks(id),
+    result_id INTEGER NOT NULL REFERENCES results(id),
+    network_revision_id INTEGER NOT NULL REFERENCES network_revisions(id),
+    points_revision_id INTEGER NOT NULL REFERENCES points_revisions(id),
+    match_radius REAL NOT NULL,
+    state TEXT NOT NULL CHECK (
+        state IN ('pending', 'running', 'done', 'stale')
+    ),
+    claim_token TEXT,
+    error TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_dwell_jobs_state ON dwell_jobs(state, id);
+CREATE INDEX IF NOT EXISTS idx_dwell_jobs_check ON dwell_jobs(check_id, id);
+
+CREATE TABLE IF NOT EXISTS dwell_conclusions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dwell_job_id INTEGER NOT NULL REFERENCES dwell_jobs(id),
+    check_id INTEGER NOT NULL REFERENCES dwell_checks(id),
+    result_id INTEGER NOT NULL REFERENCES results(id),
+    network_revision_id INTEGER NOT NULL REFERENCES network_revisions(id),
+    points_revision_id INTEGER NOT NULL REFERENCES points_revisions(id),
+    match_radius REAL NOT NULL,
+    status TEXT NOT NULL CHECK (
+        status IN ('confirmed', 'insufficient', 'unavailable')
+    ),
+    reason TEXT,
+    observed_start TEXT,
+    observed_end TEXT,
+    span_seconds REAL,
+    evidence_json TEXT NOT NULL,
+    diagnostics_json TEXT NOT NULL,
+    published_at TEXT NOT NULL,
+    invalidated_at TEXT,
+    invalidated_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_dwell_conclusions_check
+    ON dwell_conclusions(check_id, id);
+
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL

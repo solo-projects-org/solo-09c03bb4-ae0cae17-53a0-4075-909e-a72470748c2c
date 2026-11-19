@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% block title %}驻留核对 #{{ check['id'] }} · 公交行驶轨迹整理{% endblock %}
+{% block head %}{% if job and job['state'] in ('pending', 'running') %}<meta http-equiv="refresh" content="3">{% endif %}{% endblock %}
+{% block content %}
+
+{% if notice %}<div class="flash notice">{{ notice }}</div>{% endif %}
+{% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+
+<div class="panel">
+  <h2>驻留核对 #{{ check['id'] }}</h2>
+  <div class="meta">
+    <div class="item"><strong>站点所属路段号</strong><span class="mono">{{ check['segment_id'] }}</span></div>
+    <div class="item"><strong>站点平面坐标</strong><span class="mono">{{ "%.3f"|format(check['x']) }}, {{ "%.3f"|format(check['y']) }}</span></div>
+    <div class="item"><strong>判定半径</strong>{{ "%g"|format(check['radius']) }} 米</div>
+    <div class="item"><strong>最短驻留时长</strong>{{ "%g"|format(check['min_dwell_seconds']) }} 秒</div>
+    <div class="item"><strong>最大采样间隔</strong>{{ "%g"|format(check['max_gap_seconds']) }} 秒</div>
+    {% if check['note'] %}<div class="item"><strong>备注</strong>{{ check['note'] }}</div>{% endif %}
+  </div>
+  <p class="hint" style="margin-top:10px">
+    只取现行唯一轨迹中归属该路段且落入站点半径的连续定位点；相邻点间隔全部不超过最大采样间隔、
+    首末时差达到最短驻留时长时才判定已驻留。断采样不能拼成驻留。
+  </p>
+</div>
+
+<div class="panel">
+  <h2>核对结论</h2>
+  {% if conclusion %}
+    <div class="meta" style="margin-bottom:12px">
+      <div class="item"><strong>结论</strong>
+        <span class="badge {{ conclusion['status'] }}">{{ dwell_status_text[conclusion['status']] }}</span>
+      </div>
+      <div class="item"><strong>结论编号</strong>#{{ conclusion['id'] }}</div>
+      <div class="item"><strong>绑定轨迹结果</strong>
+        <a href="/results/{{ conclusion['result_id'] }}">#{{ conclusion['result_id'] }}</a>
+      </div>
+      <div class="item"><strong>依据来源</strong>
+        路网 r{{ conclusion['network_revision_id'] }} /
+        定位点 r{{ conclusion['points_revision_id'] }} /
+        匹配半径 {{ "%g"|format(conclusion['match_radius']) }} m
+      </div>
+      <div class="item"><strong>核对时间（UTC）</strong>{{ conclusion['published_at'] }}</div>
+    </div>
+
+    {% if conclusion['status'] == 'confirmed' %}
+      <div class="track">
+        观察到的驻留：{{ conclusion['observed_start'] }} → {{ conclusion['observed_end'] }}
+        （首末时差 {{ "%.1f"|format(conclusion['span_seconds']) }} 秒，证据点 {{ evidence|length }} 个）
+      </div>
+    {% else %}
+      <div class="reason">
+        <strong>{{ dwell_status_text[conclusion['status']] }}，不得给出已驻留结论。</strong>
+        {{ dwell_reason_text.get(conclusion['reason'], conclusion['reason']) }}
+        {% if diagnostics.get('longest_run_span_seconds') is not none %}
+          <br>最长连续观测段：{{ diagnostics['longest_run_start'] }} → {{ diagnostics['longest_run_end'] }}
+          （{{ "%.1f"|format(diagnostics['longest_run_span_seconds']) }} 秒，
+          {{ diagnostics['longest_run_points'] }} 点），未达到最短驻留时长。
+        {% endif %}
+      </div>
+    {% endif %}
+  {% else %}
+    <p class="empty">
+      {% if not current_result %}
+        当前没有已发布的轨迹结果，核对保持待核；轨迹发布后系统会自动核对。
+      {% elif job and job['state'] in ('pending', 'running') %}
+        核对{% if job['state'] == 'running' %}进行中{% else %}排队中{% endif %}，完成后在此显示结论。
+      {% else %}
+        尚无有效结论，请点击下方按钮重新核对。
+      {% endif %}
+    </p>
+  {% endif %}
+
+  {% if job and job['state'] != 'done' %}
+    <p class="hint">
+      最近核对任务 #{{ job['id'] }}：
+      <span class="badge {{ job['state'] }}">{{ dwell_job_text.get(job['state'], job['state']) }}</span>
+      {% if job['error'] %} · {{ job['error'] }}{% endif %}
+      {% if job['state'] == 'pending' and job['attempts'] %} · 已尝试 {{ job['attempts'] }} 次，稍后自动重试{% endif %}
+    </p>
+  {% endif %}
+
+  <form method="post" action="/dwell-checks/{{ check['id'] }}/recheck" style="margin-top:12px">
+    <button type="submit" class="secondary">按当前轨迹重新核对</button>
+  </form>
+</div>
+
+{% if conclusion and conclusion['status'] == 'confirmed' %}
+<div class="panel">
+  <h2>证据点（构成驻留的连续定位点）</h2>
+  <div class="scroll" style="max-height:320px">
+  <table>
+    <thead><tr><th>序号</th><th>时刻（UTC）</th><th>x</th><th>y</th><th>到站心距离（米）</th></tr></thead>
+    <tbody>
+    {% for p in evidence %}
+      <tr class="current-seg">
+        <td class="num">{{ p['seq'] }}</td>
+        <td class="mono">{{ p['ts'] }}</td>
+        <td class="num mono">{{ "%.3f"|format(p['x']) }}</td>
+        <td class="num mono">{{ "%.3f"|format(p['y']) }}</td>
+        <td class="num">{{ "%.3f"|format(p['distance']) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+
+{% if history %}
+<div class="panel">
+  <h2>结论历史（含已撤销）</h2>
+  <div class="scroll" style="max-height:280px">
+  <table>
+    <thead><tr><th>结论</th><th>结果</th><th>轨迹</th><th>来源绑定</th><th>核对时间</th><th>状态</th></tr></thead>
+    <tbody>
+    {% for h in history %}
+      <tr>
+        <td>#{{ h['id'] }}</td>
+        <td>
+          {% if h['invalidated_at'] %}
+            <span class="badge stale">已撤销</span>
+          {% else %}
+            <span class="badge {{ h['status'] }}">{{ dwell_status_text[h['status']] }}</span>
+          {% endif %}
+        </td>
+        <td><a href="/results/{{ h['result_id'] }}">#{{ h['result_id'] }}</a></td>
+        <td class="mono">路网 r{{ h['network_revision_id'] }} / 定位点 r{{ h['points_revision_id'] }} / {{ "%g"|format(h['match_radius']) }} m</td>
+        <td class="mono">{{ h['published_at'] }}</td>
+        <td>
+          {% if h['invalidated_at'] %}
+            {{ source_reason_text.get(h['invalidated_reason'], h['invalidated_reason']) }} · {{ h['invalidated_at'] }}
+          {% else %}现行有效{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+
+<p><a href="/">← 返回操作页</a></p>
+
+{% endblock %}
